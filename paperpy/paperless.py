@@ -1,14 +1,39 @@
-import argparse
-import requests
-from toolbox import *
+#! /usr/bin/env python3
+#
+# Copyright (C) 2023  Michael Gale
 
-try:
-    AUTH_TOKEN = os.environ["PAPERLESS_AUTH_TOKEN"]
-except:
-    print("API authorization token not found in environment")
-    exit()
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+# OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+import argparse
+import sys
+
+from slugify import slugify
+from rich import print
+
+from toolbox import *
+from paperpy import *
+from paperpy import TITLE_COLOUR
 
 """
+Command line tool to access paperless-ng server
+
 EXAMPLE USE CASES:
   List all tags, correspondents and doc types in database:
     paperless -lt -lc -ld
@@ -45,415 +70,32 @@ EXAMPLE USE CASES:
   Show best date estimate with verbose details:
     paperless -n 300 -vd
     
-
 """
 
-class PaperItem:
-    __slots__ = ("id", "name", "slug", "count")
 
-    def __init__(self, id=None, name=None, slug=None, **kwargs):
-        self.id = id
-        self.name = name
-        self.slug = slug
-        self.count = 0
-
-    def __str__(self):
-        return "Tag: %d '%s' %d documents" % (self.id, self.name, self.count)
-
-    @staticmethod
-    def from_result(cls, result):
-        item = cls()
-        item.id = result["id"]
-        item.name = result["name"]
-        item.slug = result["slug"]
-        item.count = result["document_count"]
-        return item
-
-    @staticmethod
-    def from_lookup(result, all_items):
-        if not isinstance(result, list):
-            results = [result]
-        else:
-            results = result
-        vals = []
-        for r in results:
-            for item in all_items:
-                if r == item.id:
-                    vals.append(item)
-        if len(vals) > 1:
-            return vals
-        if len(vals) == 1:
-            return vals[0]
-        return None
-
-
-class PaperTag(PaperItem):
-    def __init__(self, **kwargs):
-        super().__init__(kwargs)
-
-    def __str__(self):
-        return self.name
-
-    def pprint(self):
-        return "Tag: %d '%s' %d documents" % (self.id, self.name, self.count)
-
-    @staticmethod
-    def from_result(result):
-        return PaperItem.from_result(PaperTag, result)
-
-
-class PaperCorrespondent(PaperItem):
-    def __init__(self, **kwargs):
-        super().__init__(kwargs)
-
-    def __str__(self):
-        return self.name
-
-    def pprint(self):
-        return "Correspondent: %d '%s' (%s) %d documents" % (
-            self.id,
-            self.name,
-            self.slug,
-            self.count,
-        )
-
-    @staticmethod
-    def from_result(result):
-        return PaperItem.from_result(PaperCorrespondent, result)
-
-
-class PaperDocType(PaperItem):
-    def __init__(self, **kwargs):
-        super().__init__(kwargs)
-
-    def __str__(self):
-        return self.name
-
-    def pprint(self):
-        return "Doc Type: %d '%s' (%s) %d documents" % (
-            self.id,
-            self.name,
-            self.slug,
-            self.count,
-        )
-
-    @staticmethod
-    def from_result(result):
-        return PaperItem.from_result(PaperDocType, result)
-
-
-class PaperDoc:
-    def __init__(self, **kwargs):
-        self.id = id
-        self.title = ""
-        self.correspondent = PaperCorrespondent()
-        self.doc_type = PaperDocType()
-        self.tags = []
-        self.created = None
-        self.added = None
-        self.asn = 0
-        self.original_fn = ""
-        self.archive_fn = ""
-        self.content = None
-
-    def __str__(self):
-        s = []
-        s.append("Document: %d '%s'" % (self.id, self.title))
-        s.append("  correspondent: %s  type: %s" % (self.correspondent, self.doc_type))
-        s.append("  created: %s  added: %s" % (self.created, self.added))
-        ts = [str(t) for t in self.tags]
-        s.append("  tags: %s" % (",".join(ts)))
-        s.append("  serial no: %s" % (self.asn))
-        s.append("  original filename: %s" % (self.original_fn))
-        s.append("  archived filename: %s" % (self.archive_fn))
-        return "\n".join(s)
-
-    def has_title_labels(self, labels):
-        labels = labels.split(",")
-        for label in labels:
-            if not all([label.lower() in self.title.lower()]):
-                return False
-        return True
-
-    def has_tags(self, tags):
-        if not isinstance(tags, (tuple, list)):
-            tags = [tags]
-        for tag in tags:
-            if isinstance(tag, int):
-                if not any([tag == t.id for t in self.tags]):
-                    return False
-            elif not any([tag == t.name for t in self.tags]):
-                return False
-        return True
-
-    def is_type(self, doc_type):
-        if doc_type == self.doc_type.name:
-            return True
-        if doc_type.lower() == self.doc_type.slug:
-            return True
-        if isinstance(doc_type, int) and doc_type == self.doc_type.id:
-            return True
-        return False
-
-    def has_correspondent(self, correspondent):
-        if correspondent == self.correspondent.name:
-            return True
-        if correspondent.lower() == self.correspondent.slug:
-            return True
-        if isinstance(correspondent, int) and correspondent == self.correspondent.id:
-            return True
-        return False
-
-    @staticmethod
-    def from_result(
-        result, tags=None, correspondents=None, doc_types=None, with_content=False
-    ):
-        d = PaperDoc()
-        d.id = result["id"]
-        d.title = result["title"]
-        if correspondents is not None:
-            d.correspondent = PaperItem.from_lookup(
-                result["correspondent"], correspondents
-            )
-        else:
-            d.correspondent = result["correspondent"]
-        if doc_types is not None:
-            d.doc_type = PaperItem.from_lookup(result["document_type"], doc_types)
-        else:
-            d.doc_type = result["document_type"]
-        if tags is not None:
-            d.tags = PaperItem.from_lookup(result["tags"], tags)
-        else:
-            d.tags = result["tags"]
-        d.created = result["created"]
-        d.added = result["added"]
-        d.asn = result["archive_serial_number"]
-        d.original_fn = result["original_file_name"]
-        d.archive_fn = result["archived_file_name"]
-        if with_content:
-            d.content = result["content"]
-        return d
-
-
-class PaperClient:
-    def __init__(self, **kwargs):
-        self.base_url = "http://paperless.home.lan:8000/api/"
-        self.headers = {"Authorization": "Token {}".format(AUTH_TOKEN)}
-        self.tags = None
-        self.correspondents = None
-        self.doc_types = None
-
-    def patch(self, endpoint, data):
-        url = self.base_url + endpoint
-        response = requests.patch(url, headers=self.headers, data=data)
-        if not response.status_code == 200:
-            print(
-                "Patch request at %s with data %s failed with code %s"
-                % (url, data, response.status_code)
-            )
-            return None
-        return response.json()
-
-    def get(self, endpoint, raw_url=None, as_is=False):
-        if raw_url is not None:
-            get_url = raw_url
-        else:
-            get_url = self.base_url + endpoint
-            if not endpoint[-1] == "/" and "?" not in endpoint:
-                get_url += "/"
-        response = requests.get(get_url, headers=self.headers)
-        if not response.status_code == 200:
-            print(
-                "Get request at %s failed with code %s"
-                % (get_url, response.status_code)
-            )
-            return None
-        if as_is:
-            return response
-        return response.json()
-
-    def multi_page_get(self, endpoint):
-        results = []
-        not_done = True
-        next_url = None
-        while not_done:
-            if next_url is None:
-                r = self.get(endpoint)
-            else:
-                r = self.get(endpoint, raw_url=next_url)
-            if r is not None:
-                results.extend(r["results"])
-                next_url = r["next"]
-                if next_url is None:
-                    not_done = False
-            else:
-                not_done = False
-        return results
-
-    def get_tags(self):
-        tags = self.multi_page_get("tags")
-        self.tags = []
-        for tag in tags:
-            t = PaperTag.from_result(tag)
-            self.tags.append(t)
-        return self.tags
-
-    def get_correspondents(self):
-        correspondents = self.multi_page_get("correspondents")
-        self.correspondents = []
-        for c in correspondents:
-            pc = PaperCorrespondent.from_result(c)
-            self.correspondents.append(pc)
-        return self.correspondents
-
-    def get_doc_types(self):
-        docs = self.multi_page_get("document_types")
-        self.doc_types = []
-        for d in docs:
-            dt = PaperDocType.from_result(d)
-            self.doc_types.append(dt)
-        return self.doc_types
-
-    def get_doc_thumbnail(self, doc_id, fn=None, show=False):
-        fn = "doc.pdf" if fn is None else fn
-        api_str = "documents/%s/thumb/" % (str(doc_id))
-        r = self.get(api_str, as_is=True)
-        if r.status_code == 200:
-            with open(fn, "wb") as f:
-                f.write(r.content)
-            if show:
-                os.system("open %s" % (fn))
-
-    def get_doc_pdf(self, doc_id, fn=None, show=False):
-        fn = "doc.pdf" if fn is None else fn
-        api_str = "documents/%s/download/" % (str(doc_id))
-        r = self.get(api_str, as_is=True)
-        if r.status_code == 200:
-            with open(fn, "wb") as f:
-                f.write(r.content)
-            if show:
-                os.system("open %s" % (fn))
-
-    def get_docs(
-        self,
-        doc_id=None,
-        correspondent=None,
-        doc_type=None,
-        tags=None,
-        title_labels=None,
-        with_content=False,
-    ):
-        api_str = "documents/"
-        api_str += self.query_str(
-            correspondent=correspondent, doc_type=doc_type, tags=tags
-        )
-        if doc_id is not None:
-            docs = []
-            if isinstance(doc_id, int):
-                doc_ids = [doc_id]
-            else:
-                doc_ids = doc_id
-            for d in doc_ids:
-                api_str = "documents/%s/" % (str(d))
-                docs.append(self.get(api_str))
-        else:
-            docs = self.multi_page_get(api_str)
-        self.docs = []
-        for d in docs:
-            pd = PaperDoc.from_result(
-                d,
-                tags=self.tags,
-                correspondents=self.correspondents,
-                doc_types=self.doc_types,
-                with_content=with_content,
-            )
-            if tags is not None:
-                if not pd.has_tags(tags):
-                    continue
-            if title_labels is not None:
-                if not pd.has_title_labels(title_labels):
-                    continue
-            self.docs.append(pd)
-        return self.docs
-
-    def set_doc_correspondent(self, doc_id, correspondent):
-        api_str = "documents/%d/" % (doc_id)
-        itemid = self.lookup_item_id(correspondent, self.correspondents)
-        if itemid is not None:
-            data = {"correspondent": str(itemid)}
-            r = self.patch(api_str, data=data)
-
-    def set_doc_type(self, doc_id, doc_type):
-        api_str = "documents/%d/" % (doc_id)
-        itemid = self.lookup_item_id(doc_type, self.doc_types)
-        if itemid is not None:
-            data = {"document_type": str(itemid)}
-            r = self.patch(api_str, data=data)
-
-    def add_doc_tags(self, doc_id, tag):
-        docs = self.get_docs(doc_id=doc_id)
-        if not len(docs) == 1:
-            print("Warning: could not find document id %d" % (doc_id))
-            return
-        doc = docs[0]
-        if doc.has_tags(tag):
-            print("Warning: document %d already has tag %s" % (doc_id, tag))
-            return
-        ts = [str(t.id) for t in doc.tags]
-        new_tags = tag.split(",")
-        ts.extend([str(self.lookup_item_id(t, self.tags)) for t in new_tags])
-        data = {"tags": ts}
-        api_str = "documents/%d/" % (doc_id)
-        r = self.patch(api_str, data=data)
-
-    def remove_doc_tags(self, doc_id, tag):
-        docs = self.get_docs(doc_id=doc_id)
-        if not len(docs) == 1:
-            print("Warning: could not find document id %d" % (doc_id))
-            return
-        doc = docs[0]
-        new_tags = tag.split(",")
-        new_tags = [self.lookup_item_id(t, self.tags) for t in new_tags]
-        ts = [str(t.id) for t in doc.tags if not t.id in new_tags]
-        data = {"tags": ts}
-        api_str = "documents/%d/" % (doc_id)
-        r = self.patch(api_str, data=data)
-
-    def lookup_item_id(self, item, all_items):
-        if isinstance(item, int):
-            return item
-        for e in all_items:
-            if item == e.name or item.lower() == e.slug:
-                return e.id
-        print("Warning: Could not find item id for %s" % (item))
-        return None
-
-    def query_str(self, correspondent=None, doc_type=None, tags=None):
-        s = ["?"]
-        if correspondent is not None:
-            itemid = self.lookup_item_id(correspondent, self.correspondents)
-            s.append("correspondent__id=%d&" % (itemid))
-        if doc_type is not None:
-            itemid = self.lookup_item_id(doc_type, self.doc_types)
-            s.append("document_type__id=%d&" % (itemid))
-        if tags is not None:
-            for t in tags:
-                itemid = self.lookup_item_id(t, self.tags)
-                s.append("tags__id=%d&" % (itemid))
-        if len(s) > 1:
-            return "".join(s).rstrip("&")
-        return ""
+def print_obj_list(obj, verbose, colour):
+    if verbose:
+        print(", ".join([repr(o) for o in obj]))
+    else:
+        print(", ".join([PaperItem.colour_str(o, colour) for o in obj]))
 
 
 def main():
-    parser = argparse.ArgumentParser(prefix_chars="-+")
+    parser = argparse.ArgumentParser(
+        prefix_chars="-+",
+        prog="paperless",
+        description="""Command line utility to access a paperless-ng server. 
+        Environment variables PAPERLESS_SERVER_URL and PAPERLESS_AUTH_TOKEN must be configured to use this utility.""",
+        epilog="""Arguments using multiple comma separated terms should not have spaces before or after the commas
+        e.g. -t bill,phone,2019""",
+    )
     parser.add_argument(
         "-c",
         "--correspondent",
         action="store",
         default=None,
         nargs="?",
-        help="Include correspondent filter",
+        help="Filter documents by correspondent",
     )
     parser.add_argument(
         "-mc",
@@ -469,7 +111,7 @@ def main():
         action="store",
         default=None,
         nargs="?",
-        help="Include document type filter (Statement, Bill, etc.)",
+        help="Filter by document type (Statement, Bill, etc.)",
     )
     parser.add_argument(
         "-md",
@@ -485,7 +127,7 @@ def main():
         action="store",
         default=None,
         nargs="?",
-        help="Include tags filter (bill, visa, receipt, etc.)",
+        help="Filter by tags separated with commas (no spaces) (bill,visa,receipt etc.)",
     )
     parser.add_argument(
         "-at",
@@ -509,7 +151,15 @@ def main():
         action="store",
         default=None,
         nargs="?",
-        help="Include labels in title filter",
+        help="Filter by terms in the document title",
+    )
+    parser.add_argument(
+        "-w",
+        "--words",
+        action="store",
+        default=None,
+        nargs="?",
+        help="Filter by words in document content (comma separated)",
     )
     parser.add_argument(
         "-n",
@@ -517,7 +167,7 @@ def main():
         action="store",
         default=None,
         nargs="?",
-        help="Fetch document(s) with document id number",
+        help="Fetch document(s) with document id number (comma separated)",
     )
     parser.add_argument(
         "-y",
@@ -534,6 +184,13 @@ def main():
         default=None,
         nargs="?",
         help="Output document filename for PDF or thumbnail",
+    )
+    parser.add_argument(
+        "-m",
+        "--merge",
+        action="store_true",
+        default=False,
+        help="Merge downloaded files into one multi-page PDF",
     )
     parser.add_argument(
         "-lt",
@@ -575,7 +232,14 @@ def main():
         "--show",
         action="store_true",
         default=False,
-        help="Show downloaded thumbnail or PDF",
+        help="Show document PDF",
+    )
+    parser.add_argument(
+        "-st",
+        "--showthumb",
+        action="store_true",
+        default=False,
+        help="Show document thumbnail PNG",
     )
     parser.add_argument(
         "-v",
@@ -604,35 +268,83 @@ def main():
     pc = PaperClient()
     tags = pc.get_tags()
     if opts["listtags"]:
-        print(", ".join([str(t) for t in tags]))
+        print_obj_list(tags, opts["verbose"], TAG_COLOUR)
     cs = pc.get_correspondents()
     if opts["listcorr"]:
-        print(", ".join([str(c) for c in cs]))
+        print_obj_list(cs, opts["verbose"], CORR_COLOUR)
     ds = pc.get_doc_types()
     if opts["listdoc"]:
-        print(", ".join([str(d) for d in ds]))
+        print_obj_list(ds, opts["verbose"], DOC_COLOUR)
+
     if opts["tags"] is not None:
         opts["tags"] = opts["tags"].split(",")
     docs = None
-    get_content = opts["verbose"] or opts["year"] or opts["veryverbose"] or opts["printdate"] or opts["verbosedate"]
+    get_content = (
+        opts["verbose"]
+        or opts["year"]
+        or opts["veryverbose"]
+        or opts["printdate"]
+        or opts["verbosedate"]
+    )
     if opts["number"] is not None:
         opts["number"] = opts["number"].split(",")
         docs = pc.get_docs(doc_id=opts["number"], with_content=get_content)
     else:
-        if any([opts["correspondent"], opts["doctype"], opts["tags"], opts["title"]]):
+        if any(
+            [
+                opts["correspondent"],
+                opts["doctype"],
+                opts["tags"],
+                opts["title"],
+                opts["words"],
+            ]
+        ):
             docs = pc.get_docs(
                 correspondent=opts["correspondent"],
                 doc_type=opts["doctype"],
                 tags=opts["tags"],
                 title_labels=opts["title"],
                 with_content=get_content,
+                content_terms=opts["words"],
             )
-    if docs is not None and len(docs) == 1 and opts["output"] is not None:
-        doc_id = docs[0].id
-        if opts["output"].lower().endswith("pdf"):
-            pc.get_doc_pdf(doc_id, opts["output"], opts["show"])
-        else:
-            pc.get_doc_thumbnail(doc_id, opts["output"], opts["show"])
+    if docs is not None and any([e in sys.argv for e in ["-s", "-o", "-st"]]):
+        print("Downloading %d files..." % (len(docs)))
+        all_files = []
+        dates = []
+        for i, d in enumerate(docs):
+            fn = "doc.pdf"
+            if opts["output"] is not None:
+                fn = opts["output"]
+            elif (not opts["show"] and not opts["showthumb"]) or len(docs) > 1:
+                fn = d.title + ".pdf"
+            if opts["showthumb"]:
+                fn = fn.replace(".pdf", ".png")
+            all_files.append(fn)
+            if not opts["showthumb"]:
+                show = opts["show"] and not opts["merge"]
+                pc.get_doc_pdf(d.id, fn, show)
+            else:
+                show = opts["showthumb"] and not opts["merge"]
+                pc.get_doc_thumbnail(d.id, fn, show)
+            date = ""
+            date_count = 0
+            if opts["printdate"]:
+                tp = TextProc(text=d.content)
+                date = tp.best_date
+                date_count = len(tp.dates)
+            dates.append(date)
+            print(d.colour_str(i + 1, date, date_count))
+
+        if opts["merge"]:
+            new_args = [str(e) for e in sys.argv[1:]]
+            new_args = [e for e in new_args if e not in ["-o", "-s", "-st", "-m"]]
+            mergefn = "-".join([str(e) for e in new_args])
+            mergefn = slugify(mergefn)
+            mergefn = "Docs-" + mergefn + ".pdf"
+            print("Merging documents into [%s bold]%s[/]..." % (TITLE_COLOUR, mergefn))
+            merge_docs(mergefn, all_files, dates, opts["showthumb"])
+            if opts["show"] or opts["showthumb"]:
+                os.system("open %s" % (mergefn))
         return
 
     if docs is not None:
@@ -649,6 +361,8 @@ def main():
                 pc.remove_doc_tags(d.id, opts["removetag"])
             dd = pc.get_docs(doc_id=d.id, with_content=True)
             d = dd[0]
+            date_str = None
+            date_count = None
             if get_content:
                 tp = TextProc(text=d.content)
                 if opts["verbosedate"]:
@@ -657,10 +371,12 @@ def main():
                 if opts["strictdate"]:
                     tp.dates = tp.get_dates(preferred_format=["%b %d %Y"])
                 if opts["printdate"] or opts["verbosedate"]:
-                    toolboxprint(
-                        "Document %d best date: %s using %d date candidates"
-                        % (d.id, tp.best_date, len(tp.dates)), yellow_words=[(str(d.id))]
-                    )
+                    date_str = tp.best_date
+                    date_count = len(tp.dates)
+                    if date_str is None:
+                        date_str = "----------"
+                        date_count = "--"
+
                 if opts["year"] is not None:
                     if not str(tp.best_date)[:4] == opts["year"]:
                         print(
@@ -670,27 +386,17 @@ def main():
                         continue
                     else:
                         found.append(d)
-            ts = [str(t) for t in d.tags]
-            toolboxprint(
-                "%3d %3d %-32s %-12s %-16s %s"
-                % (i + 1, d.id, d.title, d.correspondent, d.doc_type, ",".join(ts)),
-                yellow_words=[str(d.id)],
-                magenta_words=[str(d.doc_type)],
-                green_words=[d.title],
-            )
+            print(d.colour_str(i + 1, date_str, date_count))
             if opts["verbose"] or opts["veryverbose"]:
-                toolboxprint(tp)
+                print(tp)
             if opts["veryverbose"]:
-                toolboxprint(tp.tokens)
+                print(
+                    tp.tokens,
+                )
         if len(found) > 0:
             for i, d in enumerate(found):
-                toolboxprint(
-                    "%3d %3d %-32s %-12s %-16s %s"
-                    % (i + 1, d.id, d.title, d.correspondent, d.doc_type, ",".join(ts)),
-                    yellow_words=[str(d.id)],
-                    magenta_words=[str(d.doc_type)],
-                    green_words=[d.title],
-                )
+                print(d.colour_str(i + 1))
+
 
 if __name__ == "__main__":
     main()
