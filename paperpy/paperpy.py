@@ -24,7 +24,7 @@
 import os
 import requests
 import cv2
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageChops
 from pypdf import PdfMerger
 
 from paperpy import (
@@ -35,6 +35,21 @@ from paperpy import (
     CORR_COLOUR,
     TITLE_COLOUR,
 )
+
+MONTH_DICT = {
+    "01": "Jan",
+    "02": "Feb",
+    "03": "Mar",
+    "04": "Apr",
+    "05": "May",
+    "06": "Jun",
+    "07": "Jul",
+    "08": "Aug",
+    "09": "Sep",
+    "10": "Oct",
+    "11": "Nov",
+    "12": "Dec",
+}
 
 
 def listify(x):
@@ -135,6 +150,9 @@ class PaperDoc:
         self.original_fn = ""
         self.archive_fn = ""
         self.content = None
+        self.year = ""
+        self.month = ""
+        self.day = ""
 
     def __str__(self):
         s = []
@@ -164,6 +182,14 @@ class PaperDoc:
             str(self.doc_type)[:12],
             str(PaperTag.colour_str(self.tags)),
         )
+
+    def set_date(self, date):
+        if date is None:
+            return
+        self.year = date[:4]
+        self.month = date[5:7]
+        self.month_str = MONTH_DICT[self.month]
+        self.day = date[8:10]
 
     def has_title_labels(self, labels):
         labels = labels.split(",")
@@ -201,6 +227,86 @@ class PaperDoc:
             return True
         return False
 
+    def filename_with_pattern(self, pattern):
+        """pattern specifies:
+        [usertext]
+        c or ccc... - correspondent or up to no. of characters
+        d or ddd... - document type or up to no. of characters
+        t or ttt... - token or up to no. of tokens
+        YYYY or YY - year
+        MMM or MM - month
+        DD - day
+        e.g. [EM-Invoices]-c-YYYY-MM
+            EM-Invoices-Alice-2020-02
+            EM-Invoices-Alice-2020-03 ... etc.
+        e.g. Bank-d-c-MMM-YY
+            Bank-Statement-Alice-Jan-20
+            Bank-Statement-Alice-Feb-20 etc.
+        """
+
+        def token_fill(token, prefix, content):
+            tl = int(token.replace(prefix, ""))
+            if tl == 1:
+                return content
+            return content[:tl]
+
+        text_chunks = []
+        fmt = ""
+        in_braces = False
+        for c in pattern:
+            if c == "[":
+                in_braces = True
+                text = ""
+                fmt += " [*] "
+            elif c == "]":
+                in_braces = False
+                text_chunks.append(text)
+            elif not in_braces:
+                fmt += c
+            elif in_braces:
+                text += c
+        fmt = fmt.replace("YYYY", " *Y ")
+        fmt = fmt.replace("YY", " *y ")
+        fmt = fmt.replace("MMM", " *M ")
+        fmt = fmt.replace("MM", " *m ")
+        fmt = fmt.replace("DD", " *D ")
+        for sz in range(32, 0, -1):
+            fmt = fmt.replace("c" * sz, " *(%d " % (sz))
+        for sz in range(32, 0, -1):
+            fmt = fmt.replace("d" * sz, " *)%d " % (sz))
+        for sz in range(32, 0, -1):
+            fmt = fmt.replace("t" * sz, " *^%d " % (sz))
+        fmt = fmt.split()
+        idx = 0
+        fn = []
+        for token in fmt:
+            if token == "*Y":
+                fn.append(self.year)
+            elif token == "*y":
+                fn.append(self.year[2:4])
+            elif token == "*M":
+                fn.append(self.month_str)
+            elif token == "*m":
+                fn.append(self.month)
+            elif token == "*D":
+                fn.append(self.day)
+            elif token.startswith("*("):
+                fn.append(token_fill(token, "*(", str(self.correspondent)))
+            elif token.startswith("*^"):
+                tl = int(token.replace("*^", ""))
+                tm = min(tl, len(self.tags))
+                for i in range(tm):
+                    fn.append(str(self.tags[i]))
+            elif token.startswith("*)"):
+                fn.append(token_fill(token, "*)", str(self.doc_type)))
+            elif token == "[*]":
+                fn.append(text_chunks[idx])
+                idx += 1
+            else:
+                fn.append(token)
+        fn = "".join(fn)
+        return fn
+
     @staticmethod
     def from_result(
         result, tags=None, correspondents=None, doc_types=None, with_content=False
@@ -223,6 +329,7 @@ class PaperDoc:
         else:
             d.tags = result["tags"]
         d.created = result["created"]
+        d.set_date(str(d.created)[:10])
         d.added = result["added"]
         d.asn = result["archive_serial_number"]
         d.original_fn = result["original_file_name"]
@@ -449,11 +556,14 @@ def merge_docs(fn, files, dates, using_images=False):
 
     def file_to_image(fn, date):
         im = cv2.imread(fn)
+        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(im)
         image = image.convert("RGB")
+        image = ImageOps.autocontrast(image)
         text = fn.replace(".png", "")
-        if len(date) > 0:
-            text = text + "  Date: " + date
+        if date is not None:
+            if len(date) > 0:
+                text = text + "  Date: " + date
         draw = ImageDraw.Draw(image)
         font = ImageFont.truetype("DIN-Medium.ttf", 10)
         draw.text((0, 0), text, (200, 20, 20), font=font)

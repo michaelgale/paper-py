@@ -43,15 +43,19 @@ EXAMPLE USE CASES:
   Find documents with text label(s) in document title:
     paperless -l Bank,2017,TD
     paperless -l Insurance
-  Filter options: -t, -c, -d, -l can be used in any combination
+  Find documents with search terms in the document contents:
+    paperless -w pizza,receipt
+    paperless -w mac*
+    paperless -w "air* AND (parking OR tickets)"
+  Filter options: -t, -c, -d, -l, -w can be used in any combination
   
-  Filter documents by year (using extension processing to estimate document date):
+  Filter documents by year (using extra processing to estimate document date):
     paperless -t statement,bank -y 2019
   
   Find documents with document id(s):
     paperless -n 200
     paperless -n 200,201,300
-  
+
   Change correspondent:
     paperless -n 300 -mc Michael
   Change doc type:
@@ -69,7 +73,24 @@ EXAMPLE USE CASES:
     paperless -n 300 -pd
   Show best date estimate with verbose details:
     paperless -n 300 -vd
-    
+
+  Download document thumbnail:
+    paperless -n 200 -o doc.png
+  Download and show thumbnail:
+    paperless -n 200 -st
+  Download PDF:
+    with document title as filename:
+    paperless -n 200 -o
+    with a new filename:
+    paperless -n 200 -o new_filename.pdf
+  Show PDF (launches macOS open app):
+    paperless -n 200 -s
+  Download several documents (filenames are the document titles):
+    paperless -t statement,visa -w pizza -o
+  Download several documents and merge into one composite PDF and show it:
+    paperless -t statement,visa -w 2020 -m -s
+    or merge the thumbnails into one PDF:
+    paperless -t statement,visa -w 2020 -m -st    
 """
 
 
@@ -78,6 +99,15 @@ def print_obj_list(obj, verbose, colour):
         print(", ".join([repr(o) for o in obj]))
     else:
         print(", ".join([PaperItem.colour_str(o, colour) for o in obj]))
+
+
+def safe_add_file(files, newfile):
+    for f in files:
+        if f == newfile:
+            f, e = split_filename(newfile)
+            newfile = f + "-1" + e
+    files.append(newfile)
+    return files
 
 
 def main():
@@ -191,6 +221,14 @@ def main():
         action="store_true",
         default=False,
         help="Merge downloaded files into one multi-page PDF",
+    )
+    parser.add_argument(
+        "-r",
+        "--rename",
+        action="store",
+        default=None,
+        nargs="?",
+        help="Rename files when using the -o argument based on a specification",
     )
     parser.add_argument(
         "-lt",
@@ -307,40 +345,63 @@ def main():
                 with_content=get_content,
                 content_terms=opts["words"],
             )
-    if docs is not None and any([e in sys.argv for e in ["-s", "-o", "-st"]]):
+    FILE_ARGS = ["-s", "-o", "-st", "-m"]
+    if docs is not None and any([e in sys.argv for e in FILE_ARGS]):
         print("Downloading %d files..." % (len(docs)))
         all_files = []
         dates = []
         for i, d in enumerate(docs):
-            fn = "doc.pdf"
-            if opts["output"] is not None:
-                fn = opts["output"]
-            elif (not opts["show"] and not opts["showthumb"]) or len(docs) > 1:
-                fn = d.title + ".pdf"
-            if opts["showthumb"]:
-                fn = fn.replace(".pdf", ".png")
-            all_files.append(fn)
-            if not opts["showthumb"]:
-                show = opts["show"] and not opts["merge"]
-                pc.get_doc_pdf(d.id, fn, show)
-            else:
-                show = opts["showthumb"] and not opts["merge"]
-                pc.get_doc_thumbnail(d.id, fn, show)
             date = ""
             date_count = 0
             if opts["printdate"]:
                 tp = TextProc(text=d.content)
                 date = tp.best_date
                 date_count = len(tp.dates)
+                d.set_date(date)
             dates.append(date)
+
+            fn = "doc.pdf"
+            if opts["output"] is not None:
+                fn = opts["output"]
+            elif (not opts["show"] and not opts["showthumb"]) or len(docs) > 1:
+                fn = d.title
+                if opts["rename"] is not None:
+                    fn = d.filename_with_pattern(opts["rename"])
+                    print(
+                        "  Renaming [%s bold]%s[/] to [#C060F0 bold]%s[/]"
+                        % (TITLE_COLOUR, d.title, fn)
+                    )
+                fn = fn + ".pdf"
+            if opts["showthumb"]:
+                fn = fn.replace(".pdf", ".png")
+            all_files = safe_add_file(all_files, fn)
+            fn = all_files[-1]
+            if not opts["showthumb"]:
+                show = opts["show"] and not opts["merge"]
+                pc.get_doc_pdf(d.id, fn, show)
+            else:
+                show = opts["showthumb"] and not opts["merge"]
+                pc.get_doc_thumbnail(d.id, fn, show)
             print(d.colour_str(i + 1, date, date_count))
 
         if opts["merge"]:
-            new_args = [str(e) for e in sys.argv[1:]]
-            new_args = [e for e in new_args if e not in ["-o", "-s", "-st", "-m"]]
-            mergefn = "-".join([str(e) for e in new_args])
-            mergefn = slugify(mergefn)
-            mergefn = "Docs-" + mergefn + ".pdf"
+            mergefn = ["Docs-"]
+            for o in [
+                opts["correspondent"],
+                opts["doctype"],
+                opts["tags"],
+                opts["title"],
+                opts["words"],
+            ]:
+                if o is None:
+                    continue
+                if isinstance(o, list):
+                    for e in o:
+                        mergefn.append(str(e))
+                else:
+                    mergefn.append(str(o))
+            mergefn = slugify("-".join(mergefn))
+            mergefn = mergefn + ".pdf"
             print("Merging documents into [%s bold]%s[/]..." % (TITLE_COLOUR, mergefn))
             merge_docs(mergefn, all_files, dates, opts["showthumb"])
             if opts["show"] or opts["showthumb"]:
@@ -373,6 +434,8 @@ def main():
                 if opts["printdate"] or opts["verbosedate"]:
                     date_str = tp.best_date
                     date_count = len(tp.dates)
+                    if date_str is not None:
+                        d.set_date(date_str)
                     if date_str is None:
                         date_str = "----------"
                         date_count = "--"
@@ -387,6 +450,7 @@ def main():
                     else:
                         found.append(d)
             print(d.colour_str(i + 1, date_str, date_count))
+
             if opts["verbose"] or opts["veryverbose"]:
                 print(tp)
             if opts["veryverbose"]:
