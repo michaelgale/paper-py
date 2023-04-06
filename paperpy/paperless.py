@@ -144,6 +144,14 @@ def main():
         help="Filter by document type (Statement, Bill, etc.)",
     )
     parser.add_argument(
+        "-cd",
+        "--changedate",
+        action="store",
+        default=None,
+        nargs="?",
+        help="Modify document created date",
+    )
+    parser.add_argument(
         "-md",
         "--moddoctype",
         action="store",
@@ -205,7 +213,7 @@ def main():
         action="store",
         default=None,
         nargs="?",
-        help="Filter documents by 4-digit year",
+        help="Filter documents by 4-digit year or ISO date YYYY-MM, YYYY-MM-DD",
     )
     parser.add_argument(
         "-o",
@@ -319,7 +327,6 @@ def main():
     docs = None
     get_content = (
         opts["verbose"]
-        or opts["year"]
         or opts["veryverbose"]
         or opts["printdate"]
         or opts["verbosedate"]
@@ -335,6 +342,7 @@ def main():
                 opts["tags"],
                 opts["title"],
                 opts["words"],
+                opts["year"],
             ]
         ):
             docs = pc.get_docs(
@@ -344,6 +352,7 @@ def main():
                 title_labels=opts["title"],
                 with_content=get_content,
                 content_terms=opts["words"],
+                date=opts["year"],
             )
     FILE_ARGS = ["-s", "-o", "-st", "-m"]
     if docs is not None and any([e in sys.argv for e in FILE_ARGS]):
@@ -351,8 +360,8 @@ def main():
         all_files = []
         dates = []
         for i, d in enumerate(docs):
-            date = ""
-            date_count = 0
+            date = d.created[:10]
+            date_count = None
             if opts["printdate"]:
                 tp = TextProc(text=d.content)
                 date = tp.best_date
@@ -392,6 +401,7 @@ def main():
                 opts["tags"],
                 opts["title"],
                 opts["words"],
+                opts["year"],
             ]:
                 if o is None:
                     continue
@@ -402,7 +412,7 @@ def main():
                     mergefn.append(str(o))
             mergefn = slugify("-".join(mergefn))
             mergefn = mergefn + ".pdf"
-            print("Merging documents into [%s bold]%s[/]..." % (TITLE_COLOUR, mergefn))
+            print("Merging documents into [#40D0FF bold]%s[/]..." % (mergefn))
             merge_docs(mergefn, all_files, dates, opts["showthumb"])
             if opts["show"] or opts["showthumb"]:
                 os.system("open %s" % (mergefn))
@@ -434,32 +444,29 @@ def main():
                 if opts["printdate"] or opts["verbosedate"]:
                     date_str = tp.best_date
                     date_count = len(tp.dates)
-                    if date_str is not None:
+                    if date_str is not None and opts["printdate"]:
                         d.set_date(date_str)
                     if date_str is None:
                         date_str = "----------"
                         date_count = "--"
+                if "-cd" in sys.argv:
+                    if opts["printdate"] and date_str is not None:
+                        if not date_str == "----------":
+                            pc.set_doc_created_date(d.id, date_str)
+                    elif opts["changedate"] is not None:
+                        pc.set_doc_created_date(d.id, opts["changedate"])
 
-                if opts["year"] is not None:
-                    if not str(tp.best_date)[:4] == opts["year"]:
-                        print(
-                            "Skipping document %d (%s) with date %s"
-                            % (d.id, d.title, tp.best_date)
-                        )
-                        continue
-                    else:
-                        found.append(d)
+            if date_str is None:
+                date_str = d.created[:10]
             print(d.colour_str(i + 1, date_str, date_count))
 
             if opts["verbose"] or opts["veryverbose"]:
+                print(str(d))
                 print(tp)
             if opts["veryverbose"]:
                 print(
                     tp.tokens,
                 )
-        if len(found) > 0:
-            for i, d in enumerate(found):
-                print(d.colour_str(i + 1))
 
 
 if __name__ == "__main__":

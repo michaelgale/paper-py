@@ -24,7 +24,7 @@
 import os
 import requests
 import cv2
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageChops
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pypdf import PdfMerger
 
 from paperpy import (
@@ -170,6 +170,8 @@ class PaperDoc:
         date_str = ""
         if date is not None and date_count is not None:
             date_str = "[#FFA0E0]%s[/][white]/%2s[/] " % (date, date_count)
+        if date is not None and date_count is None:
+            date_str = "[#AFA0E0]%s[/][white][/] " % (date)
         return "[#606060]%3d[/] [white]%3d[/] %s[%s bold]%-31s[/] [%s]%-9s[/] [%s]%-12s[/] %s" % (
             idx,
             self.id,
@@ -239,9 +241,9 @@ class PaperDoc:
         e.g. [EM-Invoices]-c-YYYY-MM
             EM-Invoices-Alice-2020-02
             EM-Invoices-Alice-2020-03 ... etc.
-        e.g. Bank-d-c-MMM-YY
-            Bank-Statement-Alice-Jan-20
-            Bank-Statement-Alice-Feb-20 etc.
+        e.g. [Bank]_dddc_MMM-YY
+            Bank_StaAlice_Jan-20
+            Bank_StaAlice_Feb-20 etc.
         """
 
         def token_fill(token, prefix, content):
@@ -352,15 +354,15 @@ class PaperClient:
         response = requests.patch(url, headers=self.headers, data=data)
         if not response.status_code == 200:
             print(
-                "Patch request at %s with data %s failed with code %s"
+                "[red]Patch request at %s with data %s failed with code %s[/]"
                 % (url, data, response.status_code)
             )
             return None
         return response.json()
 
-    def get(self, endpoint, raw_url=None, as_is=False):
-        if raw_url is not None:
-            get_url = raw_url
+    def get(self, endpoint, next_url=None, as_is=False):
+        if next_url is not None:
+            get_url = next_url
         else:
             get_url = self.base_url + endpoint
             if not endpoint[-1] == "/" and "?" not in endpoint:
@@ -368,7 +370,7 @@ class PaperClient:
         response = requests.get(get_url, headers=self.headers)
         if not response.status_code == 200:
             print(
-                "Get request at %s failed with code %s"
+                "[red]Get request at %s failed with code %s[/]"
                 % (get_url, response.status_code)
             )
             return None
@@ -384,7 +386,7 @@ class PaperClient:
             if next_url is None:
                 r = self.get(endpoint)
             else:
-                r = self.get(endpoint, raw_url=next_url)
+                r = self.get(endpoint, next_url=next_url)
             if r is not None:
                 results.extend(r["results"])
                 next_url = r["next"]
@@ -438,6 +440,7 @@ class PaperClient:
         title_labels=None,
         content_terms=None,
         with_content=False,
+        date=None,
     ):
         api_str = "documents/"
         api_str += self.query_str(
@@ -445,6 +448,7 @@ class PaperClient:
             doc_type=doc_type,
             tags=tags,
             content=content_terms,
+            date=date,
         )
         if doc_id is not None:
             docs = []
@@ -486,6 +490,13 @@ class PaperClient:
             data = {"document_type": str(itemid)}
             r = self.patch(api_str, data=data)
 
+    def set_doc_created_date(self, doc_id, date):
+        api_str = "documents/%d/" % (doc_id)
+        if date is not None:
+            new_date = "%sT12:00:00-05:00" % (date)
+            data = {"created": new_date}
+            r = self.patch(api_str, data=data)
+
     def add_doc_tags(self, doc_id, tag):
         docs = self.get_docs(doc_id=doc_id)
         if not len(docs) == 1:
@@ -498,9 +509,8 @@ class PaperClient:
         ts = [str(t.id) for t in doc.tags]
         new_tags = tag.split(",")
         ts.extend([str(self.lookup_item_id(t, self.tags)) for t in new_tags])
-        data = {"tags": ts}
         api_str = "documents/%d/" % (doc_id)
-        r = self.patch(api_str, data=data)
+        r = self.patch(api_str, data={"tags": ts})
 
     def remove_doc_tags(self, doc_id, tag):
         docs = self.get_docs(doc_id=doc_id)
@@ -511,9 +521,8 @@ class PaperClient:
         new_tags = tag.split(",")
         new_tags = [self.lookup_item_id(t, self.tags) for t in new_tags]
         ts = [str(t.id) for t in doc.tags if not t.id in new_tags]
-        data = {"tags": ts}
         api_str = "documents/%d/" % (doc_id)
-        r = self.patch(api_str, data=data)
+        r = self.patch(api_str, data={"tags": ts})
 
     def lookup_item_id(self, item, all_items):
         if isinstance(item, int):
@@ -524,7 +533,9 @@ class PaperClient:
         print("Warning: Could not find item id for %s" % (item))
         return None
 
-    def query_str(self, correspondent=None, doc_type=None, tags=None, content=None):
+    def query_str(
+        self, correspondent=None, doc_type=None, tags=None, content=None, date=None
+    ):
         s = ["?"]
         if content is not None:
             terms = listify(content.split(","))
@@ -545,6 +556,14 @@ class PaperClient:
                 itemid = self.lookup_item_id(t, self.tags)
                 if itemid is not None:
                     s.append("tags__id=%d&" % (itemid))
+        if date is not None:
+            date = date.replace("-", "").replace("/", "")
+            if len(date) >= 4:
+                s.append("created__year=%s&" % (date[:4]))
+            if len(date) >= 6:
+                s.append("created__month=%s&" % (date[4:6]))
+            if len(date) >= 8:
+                s.append("created__day=%s&" % (date[6:8]))
         if len(s) > 1:
             return "".join(s).rstrip("&")
         return ""
@@ -555,6 +574,8 @@ def merge_docs(fn, files, dates, using_images=False):
     The input files can be other pdf files or image files (using_images=True)."""
 
     def file_to_image(fn, date):
+        # open with cv2 instead of PIL since grayscale images don't
+        # convert properly when merged
         im = cv2.imread(fn)
         im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(im)
@@ -562,7 +583,10 @@ def merge_docs(fn, files, dates, using_images=False):
         image = ImageOps.autocontrast(image)
         text = fn.replace(".png", "")
         if date is not None:
-            if len(date) > 0:
+            if len(date) >= 8:
+                ds = date.split("-")
+                if len(ds) == 3:
+                    date = ds[0] + "-" + MONTH_DICT[ds[1]] + "-" + ds[2]
                 text = text + "  Date: " + date
         draw = ImageDraw.Draw(image)
         font = ImageFont.truetype("DIN-Medium.ttf", 10)
