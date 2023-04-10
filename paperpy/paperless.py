@@ -332,9 +332,11 @@ def main():
         or opts["verbosedate"]
     )
     if opts["number"] is not None:
+        # search by document number(s)
         opts["number"] = opts["number"].split(",")
         docs = pc.get_docs(doc_id=opts["number"], with_content=get_content)
     else:
+        # search by correspondent, tags, type, title, words, year
         if any(
             [
                 opts["correspondent"],
@@ -350,9 +352,9 @@ def main():
                 doc_type=opts["doctype"],
                 tags=opts["tags"],
                 title_labels=opts["title"],
-                with_content=get_content,
                 content_terms=opts["words"],
                 date=opts["year"],
+                with_content=get_content,
             )
     FILE_ARGS = ["-s", "-o", "-st", "-m"]
     if docs is not None and any([e in sys.argv for e in FILE_ARGS]):
@@ -420,18 +422,15 @@ def main():
 
     if docs is not None:
         print("Found %d documents" % (len(docs)))
-        found = []
         for i, d in enumerate(docs):
             if opts["modcorrespondent"]:
-                pc.set_doc_correspondent(d.id, opts["modcorrespondent"])
+                d = pc.set_doc_correspondent(d.id, opts["modcorrespondent"])
             if opts["moddoctype"]:
-                pc.set_doc_type(d.id, opts["moddoctype"])
+                d = pc.set_doc_type(d.id, opts["moddoctype"])
             if opts["addtag"]:
-                pc.add_doc_tags(d.id, opts["addtag"])
+                d = pc.add_doc_tags(d.id, opts["addtag"])
             if opts["removetag"]:
-                pc.remove_doc_tags(d.id, opts["removetag"])
-            dd = pc.get_docs(doc_id=d.id, with_content=True)
-            d = dd[0]
+                d = pc.remove_doc_tags(d.id, opts["removetag"])
             date_str = None
             date_count = None
             if get_content:
@@ -452,9 +451,9 @@ def main():
                 if "-cd" in sys.argv:
                     if opts["printdate"] and date_str is not None:
                         if not date_str == "----------":
-                            pc.set_doc_created_date(d.id, date_str)
+                            d = pc.set_doc_created_date(d.id, date_str)
                     elif opts["changedate"] is not None:
-                        pc.set_doc_created_date(d.id, opts["changedate"])
+                        d = pc.set_doc_created_date(d.id, opts["changedate"])
 
             if date_str is None:
                 date_str = d.created[:10]

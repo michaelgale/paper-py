@@ -358,7 +358,14 @@ class PaperClient:
                 % (url, data, response.status_code)
             )
             return None
-        return response.json()
+        pd = PaperDoc.from_result(
+                response.json(),
+                tags=self.tags,
+                correspondents=self.correspondents,
+                doc_types=self.doc_types,
+                with_content=True,
+            )        
+        return pd
 
     def get(self, endpoint, next_url=None, as_is=False):
         if next_url is not None:
@@ -481,21 +488,24 @@ class PaperClient:
         itemid = self.lookup_item_id(correspondent, self.correspondents)
         if itemid is not None:
             data = {"correspondent": str(itemid)}
-            r = self.patch(api_str, data=data)
+            return self.patch(api_str, data=data)
+        return None
 
     def set_doc_type(self, doc_id, doc_type):
         api_str = "documents/%d/" % (doc_id)
         itemid = self.lookup_item_id(doc_type, self.doc_types)
         if itemid is not None:
             data = {"document_type": str(itemid)}
-            r = self.patch(api_str, data=data)
+            return self.patch(api_str, data=data)
+        return None
 
     def set_doc_created_date(self, doc_id, date):
         api_str = "documents/%d/" % (doc_id)
         if date is not None:
             new_date = "%sT12:00:00-05:00" % (date)
             data = {"created": new_date}
-            r = self.patch(api_str, data=data)
+            return self.patch(api_str, data=data)
+        return None
 
     def add_doc_tags(self, doc_id, tag):
         docs = self.get_docs(doc_id=doc_id)
@@ -510,7 +520,7 @@ class PaperClient:
         new_tags = tag.split(",")
         ts.extend([str(self.lookup_item_id(t, self.tags)) for t in new_tags])
         api_str = "documents/%d/" % (doc_id)
-        r = self.patch(api_str, data={"tags": ts})
+        return self.patch(api_str, data={"tags": ts})
 
     def remove_doc_tags(self, doc_id, tag):
         docs = self.get_docs(doc_id=doc_id)
@@ -522,7 +532,7 @@ class PaperClient:
         new_tags = [self.lookup_item_id(t, self.tags) for t in new_tags]
         ts = [str(t.id) for t in doc.tags if not t.id in new_tags]
         api_str = "documents/%d/" % (doc_id)
-        r = self.patch(api_str, data={"tags": ts})
+        return self.patch(api_str, data={"tags": ts})
 
     def lookup_item_id(self, item, all_items):
         if isinstance(item, int):
@@ -582,15 +592,19 @@ def merge_docs(fn, files, dates, using_images=False):
         image = image.convert("RGB")
         image = ImageOps.autocontrast(image)
         text = fn.replace(".png", "")
+        draw = ImageDraw.Draw(image)
+        try:
+            font = ImageFont.truetype("DIN-Medium.ttf", 10)
+        except OSError:
+            font = ImageFont.load_default()
+        draw.text((0, 0), text, (160, 20, 20), font=font)
         if date is not None:
             if len(date) >= 8:
                 ds = date.split("-")
                 if len(ds) == 3:
                     date = ds[0] + "-" + MONTH_DICT[ds[1]] + "-" + ds[2]
-                text = text + "  Date: " + date
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype("DIN-Medium.ttf", 10)
-        draw.text((0, 0), text, (200, 20, 20), font=font)
+                x2 = image.width / 2
+                draw.text((x2, 0), date, (160, 20, 20), font=font)
         return image
 
     if using_images:
