@@ -184,6 +184,14 @@ def main():
         help="Remove tag from document",
     )
     parser.add_argument(
+        "-mt",
+        "--modtitle",
+        action="store",
+        default=None,
+        nargs="?",
+        help="Modify document title",
+    )
+    parser.add_argument(
         "-l",
         "--title",
         action="store",
@@ -361,6 +369,7 @@ def main():
         print("Downloading %d files..." % (len(docs)))
         all_files = []
         dates = []
+        all_ids = []
         for i, d in enumerate(docs):
             date = d.created[:10]
             date_count = None
@@ -370,6 +379,7 @@ def main():
                 date_count = len(tp.dates)
                 d.set_date(date)
             dates.append(date)
+            all_ids.append(d.id)
 
             fn = "doc.pdf"
             if opts["output"] is not None:
@@ -415,7 +425,7 @@ def main():
             mergefn = slugify("-".join(mergefn))
             mergefn = mergefn + ".pdf"
             print("Merging documents into [#40D0FF bold]%s[/]..." % (mergefn))
-            merge_docs(mergefn, all_files, dates, opts["showthumb"])
+            merge_docs(mergefn, all_files, dates, opts["showthumb"], all_ids)
             if opts["show"] or opts["showthumb"]:
                 os.system("open %s" % (mergefn))
         return
@@ -427,6 +437,16 @@ def main():
                 d = pc.set_doc_correspondent(d.id, opts["modcorrespondent"])
             if opts["moddoctype"]:
                 d = pc.set_doc_type(d.id, opts["moddoctype"])
+            if opts["modtitle"] and not opts["rename"]:
+                d = pc.set_doc_title(d.id, opts["modtitle"])
+            if "-mt" in sys.argv and opts["rename"] is not None:
+                fn = d.filename_with_pattern(opts["rename"])
+                if fn is not None and len(fn) > 0:
+                    print(
+                        "  Changing title [%s bold]%s[/] to [#C060F0 bold]%s[/]"
+                        % (TITLE_COLOUR, d.title, fn)
+                    )
+                    d = pc.set_doc_title(d.id, fn)
             if opts["addtag"]:
                 d = pc.add_doc_tags(d.id, opts["addtag"])
             if opts["removetag"]:
@@ -463,9 +483,7 @@ def main():
                 print(str(d))
                 print(tp)
             if opts["veryverbose"]:
-                print(
-                    tp.tokens,
-                )
+                print(tp.tokens)
 
 
 if __name__ == "__main__":

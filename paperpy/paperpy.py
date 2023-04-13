@@ -344,6 +344,8 @@ class PaperDoc:
 class PaperClient:
     def __init__(self, **kwargs):
         self.base_url = SERVER_URL
+        if not self.base_url.endswith("/"):
+            self.base_url += "/"
         self.headers = {"Authorization": "Token {}".format(AUTH_TOKEN)}
         self.tags = None
         self.correspondents = None
@@ -359,12 +361,12 @@ class PaperClient:
             )
             return None
         pd = PaperDoc.from_result(
-                response.json(),
-                tags=self.tags,
-                correspondents=self.correspondents,
-                doc_types=self.doc_types,
-                with_content=True,
-            )        
+            response.json(),
+            tags=self.tags,
+            correspondents=self.correspondents,
+            doc_types=self.doc_types,
+            with_content=True,
+        )
         return pd
 
     def get(self, endpoint, next_url=None, as_is=False):
@@ -507,6 +509,13 @@ class PaperClient:
             return self.patch(api_str, data=data)
         return None
 
+    def set_doc_title(self, doc_id, title):
+        api_str = "documents/%d/" % (doc_id)
+        if title is not None:
+            data = {"title": str(title)}
+            return self.patch(api_str, data=data)
+        return None
+
     def add_doc_tags(self, doc_id, tag):
         docs = self.get_docs(doc_id=doc_id)
         if not len(docs) == 1:
@@ -579,11 +588,11 @@ class PaperClient:
         return ""
 
 
-def merge_docs(fn, files, dates, using_images=False):
+def merge_docs(fn, files, dates, using_images=False, other=None):
     """Merges a list of files (with date strings) into a consolidated pdf file.
     The input files can be other pdf files or image files (using_images=True)."""
 
-    def file_to_image(fn, date):
+    def file_to_image(fn, date, other=""):
         # open with cv2 instead of PIL since grayscale images don't
         # convert properly when merged
         im = cv2.imread(fn)
@@ -591,7 +600,7 @@ def merge_docs(fn, files, dates, using_images=False):
         image = Image.fromarray(im)
         image = image.convert("RGB")
         image = ImageOps.autocontrast(image)
-        text = fn.replace(".png", "")
+        text = "%s: %s" % (other, fn.replace(".png", ""))
         draw = ImageDraw.Draw(image)
         try:
             font = ImageFont.truetype("DIN-Medium.ttf", 10)
@@ -608,7 +617,10 @@ def merge_docs(fn, files, dates, using_images=False):
         return image
 
     if using_images:
-        images = [file_to_image(f, d) for f, d in zip(files, dates)]
+        if other is not None:
+            images = [file_to_image(f, d, o) for f, d, o in zip(files, dates, other)]
+        else:
+            images = [file_to_image(f, d) for f, d in zip(files, dates)]
         images[0].save(fn, save_all=True, append_images=images[1:])
     else:
         merger = PdfMerger()

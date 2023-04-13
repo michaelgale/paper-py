@@ -1,0 +1,4 @@
+opencv-python
+pypdf
+unicode-slugify
+
