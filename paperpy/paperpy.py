@@ -26,6 +26,7 @@ import requests
 import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pypdf import PdfMerger
+from rich import print
 
 from paperpy import (
     SERVER_URL,
@@ -34,6 +35,7 @@ from paperpy import (
     DOC_COLOUR,
     CORR_COLOUR,
     TITLE_COLOUR,
+    DATE_COLOUR,
 )
 
 MONTH_DICT = {
@@ -108,6 +110,7 @@ class PaperTag(PaperItem):
 
     @staticmethod
     def colour_str(tags, sep=" "):
+        tags = listify(tags)
         return "".join(["[%s]%s[/]%s" % (TAG_COLOUR, t, sep) for t in tags]).rstrip(",")
 
 
@@ -123,6 +126,10 @@ class PaperCorrespondent(PaperItem):
             self.count,
         )
 
+    def colour_str(self, length=9, colour=CORR_COLOUR):
+        fmt = "[%%s]%%-%ds[/]" % (length)
+        return fmt % (colour, self.name[:length])
+
 
 class PaperDocType(PaperItem):
     def __init__(self, **kwargs):
@@ -135,6 +142,10 @@ class PaperDocType(PaperItem):
             self.slug,
             self.count,
         )
+
+    def colour_str(self, length=12, colour=DOC_COLOUR):
+        fmt = "[%%s]%%-%ds[/]" % (length)
+        return fmt % (colour, self.name[:length])
 
 
 class PaperDoc:
@@ -153,6 +164,9 @@ class PaperDoc:
         self.year = ""
         self.month = ""
         self.day = ""
+        for k, v in kwargs.items():
+            if k in self.__dict__:
+                self.__dict__[k] = v
 
     def __str__(self):
         s = []
@@ -167,21 +181,30 @@ class PaperDoc:
         return "\n".join(s)
 
     def colour_str(self, idx, date=None, date_count=None):
+        def diff_date(a, b):
+            dstr = ""
+            for ca, cb in zip(a, b):
+                if ca == cb:
+                    dstr += "[green]%1s[/]" % (cb)
+                else:
+                    dstr += "[yellow]%1s[/]" % (cb)
+            return dstr
+
         date_str = ""
         if date is not None and date_count is not None:
-            date_str = "[#FFA0E0]%s[/][white]/%2s[/] " % (date, date_count)
+            cdate = str(self.created)[:10]
+            date_str = "[%s]%s[/][white]/%2s[/] " % (DATE_COLOUR, cdate, date_count)
+            date_str = date_str + diff_date(cdate, date) + " "
         if date is not None and date_count is None:
-            date_str = "[#AFA0E0]%s[/][white][/] " % (date)
-        return "[#606060]%3d[/] [white]%3d[/] %s[%s bold]%-31s[/] [%s]%-9s[/] [%s]%-12s[/] %s" % (
+            date_str = "[%s]%s[/][white][/] " % (DATE_COLOUR, date)
+        return "[#606060]%3d[/] [white]%4d[/] %s[%s bold]%-31s[/] %s %s %s" % (
             idx,
             self.id,
             date_str,
             TITLE_COLOUR,
             str(self.title)[:31],
-            CORR_COLOUR,
-            str(self.correspondent)[:9],
-            DOC_COLOUR,
-            str(self.doc_type)[:12],
+            self.correspondent.colour_str(),
+            self.doc_type.colour_str(),
             str(PaperTag.colour_str(self.tags)),
         )
 
@@ -201,8 +224,7 @@ class PaperDoc:
         return True
 
     def has_tags(self, tags):
-        if not isinstance(tags, (tuple, list)):
-            tags = [tags]
+        tags = listify(tags)
         for tag in tags:
             if isinstance(tag, int):
                 if not any([tag == t.id for t in self.tags]):
@@ -210,6 +232,16 @@ class PaperDoc:
             elif not any([tag == t.name for t in self.tags]):
                 return False
         return True
+
+    def has_any_tags(self, tags):
+        tags = listify(tags)
+        for tag in tags:
+            if isinstance(tag, int):
+                if any([tag == t.id for t in self.tags]):
+                    return True
+            elif any([tag == t.name for t in self.tags]):
+                return True
+        return False
 
     def is_type(self, doc_type):
         if doc_type == self.doc_type.name:
@@ -350,6 +382,14 @@ class PaperClient:
         self.tags = None
         self.correspondents = None
         self.doc_types = None
+        self.dry_run = False
+
+    def __getitem__(self, key):
+        """Returns a PaperDoc object with specified ID as the key"""
+        docs = self.get_docs(doc_id=key)
+        if len(docs) > 0:
+            return docs[0]
+        return None
 
     def patch(self, endpoint, data):
         url = self.base_url + endpoint
@@ -450,6 +490,7 @@ class PaperClient:
         content_terms=None,
         with_content=False,
         date=None,
+        any_tags=None,
     ):
         api_str = "documents/"
         api_str += self.query_str(
@@ -479,6 +520,9 @@ class PaperClient:
             if tags is not None:
                 if not pd.has_tags(tags):
                     continue
+            if any_tags is not None:
+                if not pd.has_any_tags(any_tags):
+                    continue
             if title_labels is not None:
                 if not pd.has_title_labels(title_labels):
                     continue
@@ -489,6 +533,12 @@ class PaperClient:
         api_str = "documents/%d/" % (doc_id)
         itemid = self.lookup_item_id(correspondent, self.correspondents)
         if itemid is not None:
+            if self.dry_run:
+                print(
+                    "Would change document correspondent to [%s]%s[/]"
+                    % (CORR_COLOUR, correspondent)
+                )
+                return self[doc_id]
             data = {"correspondent": str(itemid)}
             return self.patch(api_str, data=data)
         return None
@@ -497,6 +547,11 @@ class PaperClient:
         api_str = "documents/%d/" % (doc_id)
         itemid = self.lookup_item_id(doc_type, self.doc_types)
         if itemid is not None:
+            if self.dry_run:
+                print(
+                    "Would change document type to [%s]%s[/]" % (DOC_COLOUR, doc_type)
+                )
+                return self[doc_id]
             data = {"document_type": str(itemid)}
             return self.patch(api_str, data=data)
         return None
@@ -504,6 +559,9 @@ class PaperClient:
     def set_doc_created_date(self, doc_id, date):
         api_str = "documents/%d/" % (doc_id)
         if date is not None:
+            if self.dry_run:
+                print("Would change document date to [%s]%s[/]" % (DATE_COLOUR, date))
+                return self[doc_id]
             new_date = "%sT12:00:00-05:00" % (date)
             data = {"created": new_date}
             return self.patch(api_str, data=data)
@@ -512,6 +570,11 @@ class PaperClient:
     def set_doc_title(self, doc_id, title):
         api_str = "documents/%d/" % (doc_id)
         if title is not None:
+            if self.dry_run:
+                print(
+                    "Would change document title to [%s]%s[/]" % (TITLE_COLOUR, title)
+                )
+                return self[doc_id]
             data = {"title": str(title)}
             return self.patch(api_str, data=data)
         return None
@@ -522,25 +585,41 @@ class PaperClient:
             print("Warning: could not find document id %d" % (doc_id))
             return
         doc = docs[0]
-        if doc.has_tags(tag):
-            print("Warning: document %d already has tag %s" % (doc_id, tag))
-            return
+        unique_tags = []
+        for t in tag.split(","):
+            if doc.has_tags(t):
+                print(
+                    "Warning: document [white]%d[/] already has tag %s"
+                    % (doc_id, PaperTag.colour_str(t))
+                )
+            else:
+                unique_tags.append(t)
+        if len(unique_tags) == 0:
+            print("No new tags added")
+            return self[doc_id]
+        tag = ",".join(unique_tags)
         ts = [str(t.id) for t in doc.tags]
         new_tags = tag.split(",")
         ts.extend([str(self.lookup_item_id(t, self.tags)) for t in new_tags])
         api_str = "documents/%d/" % (doc_id)
+        if self.dry_run:
+            print("Would add document tags %s" % (PaperTag.colour_str(tag)))
+            return self[doc_id]
         return self.patch(api_str, data={"tags": ts})
 
     def remove_doc_tags(self, doc_id, tag):
         docs = self.get_docs(doc_id=doc_id)
         if not len(docs) == 1:
-            print("Warning: could not find document id %d" % (doc_id))
+            print("Warning: could not find document id [white]%d[/]" % (doc_id))
             return
         doc = docs[0]
         new_tags = tag.split(",")
         new_tags = [self.lookup_item_id(t, self.tags) for t in new_tags]
         ts = [str(t.id) for t in doc.tags if not t.id in new_tags]
         api_str = "documents/%d/" % (doc_id)
+        if self.dry_run:
+            print("Would remove document tags %s" % (PaperTag.colour_str(tag)))
+            return self[doc_id]
         return self.patch(api_str, data={"tags": ts})
 
     def lookup_item_id(self, item, all_items):
@@ -549,7 +628,7 @@ class PaperClient:
         for e in all_items:
             if item == e.name or item.lower() == e.slug:
                 return e.id
-        print("Warning: Could not find item id for %s" % (item))
+        print("[yellow]Warning: Could not find item id for [white]%s[/][/]" % (item))
         return None
 
     def query_str(
@@ -592,7 +671,7 @@ def merge_docs(fn, files, dates, using_images=False, other=None):
     """Merges a list of files (with date strings) into a consolidated pdf file.
     The input files can be other pdf files or image files (using_images=True)."""
 
-    def file_to_image(fn, date, other=""):
+    def file_to_image(fn, date, prefix=None):
         # open with cv2 instead of PIL since grayscale images don't
         # convert properly when merged
         im = cv2.imread(fn)
@@ -600,13 +679,16 @@ def merge_docs(fn, files, dates, using_images=False, other=None):
         image = Image.fromarray(im)
         image = image.convert("RGB")
         image = ImageOps.autocontrast(image)
-        text = "%s: %s" % (other, fn.replace(".png", ""))
+        if prefix is not None:
+            text = "%s: %s" % (prefix, fn.replace(".png", ""))
+        else:
+            text = "%s" % (fn.replace(".png", ""))
         draw = ImageDraw.Draw(image)
         try:
             font = ImageFont.truetype("DIN-Medium.ttf", 10)
         except OSError:
             font = ImageFont.load_default()
-        draw.text((0, 0), text, (160, 20, 20), font=font)
+        draw.text((0, 0), text, (40, 20, 160), font=font)
         if date is not None:
             if len(date) >= 8:
                 ds = date.split("-")

@@ -23,6 +23,7 @@
 
 import argparse
 import sys
+import tempfile
 
 from slugify import slugify
 from rich import print
@@ -73,6 +74,8 @@ EXAMPLE USE CASES:
     paperless -n 300 -pd
   Show best date estimate with verbose details:
     paperless -n 300 -vd
+  Change date to best date:
+    paperless =n 300 -pd -cd
 
   Download document thumbnail:
     paperless -n 200 -o doc.png
@@ -165,7 +168,15 @@ def main():
         action="store",
         default=None,
         nargs="?",
-        help="Filter by tags separated with commas (no spaces) (bill,visa,receipt etc.)",
+        help="Filter by having all tags separated with commas (no spaces) (bill,visa,receipt etc.)",
+    )
+    parser.add_argument(
+        "-tany",
+        "--anytags",
+        action="store",
+        default=None,
+        nargs="?",
+        help="Filter by having any tags separated with commas (no spaces)",
     )
     parser.add_argument(
         "-at",
@@ -237,6 +248,13 @@ def main():
         action="store_true",
         default=False,
         help="Merge downloaded files into one multi-page PDF",
+    )
+    parser.add_argument(
+        "-z",
+        "--zdate",
+        action="store_true",
+        default=False,
+        help="Special rule to apply date from last characters of title",
     )
     parser.add_argument(
         "-r",
@@ -316,10 +334,26 @@ def main():
         default=False,
         help="Show debug info when finding representative date in document",
     )
+    parser.add_argument(
+        "-x",
+        "--extract",
+        action="store",
+        default=None,
+        nargs="?",
+        help="Extract tokens",
+    )
+    parser.add_argument(
+        "-dr",
+        "--dryrun",
+        action="store_true",
+        default=False,
+        help="Show modifications, but don't actually perform the change on the document(s)",
+    )
     args = parser.parse_args()
     opts = vars(args)
 
     pc = PaperClient()
+    pc.dry_run = opts["dryrun"]
     tags = pc.get_tags()
     if opts["listtags"]:
         print_obj_list(tags, opts["verbose"], TAG_COLOUR)
@@ -332,12 +366,15 @@ def main():
 
     if opts["tags"] is not None:
         opts["tags"] = opts["tags"].split(",")
+    if opts["anytags"] is not None:
+        opts["anytags"] = opts["anytags"].split(",")
     docs = None
     get_content = (
         opts["verbose"]
         or opts["veryverbose"]
         or opts["printdate"]
         or opts["verbosedate"]
+        or opts["extract"]
     )
     if opts["number"] is not None:
         # search by document number(s)
@@ -350,6 +387,7 @@ def main():
                 opts["correspondent"],
                 opts["doctype"],
                 opts["tags"],
+                opts["anytags"],
                 opts["title"],
                 opts["words"],
                 opts["year"],
@@ -363,6 +401,7 @@ def main():
                 content_terms=opts["words"],
                 date=opts["year"],
                 with_content=get_content,
+                any_tags=opts["anytags"],
             )
     FILE_ARGS = ["-s", "-o", "-st", "-m"]
     if docs is not None and any([e in sys.argv for e in FILE_ARGS]):
@@ -389,7 +428,7 @@ def main():
                 if opts["rename"] is not None:
                     fn = d.filename_with_pattern(opts["rename"])
                     print(
-                        "  Renaming [%s bold]%s[/] to [#C060F0 bold]%s[/]"
+                        "  Renaming [%s bold]%s[/] to [#7080F0 bold]%s[/]"
                         % (TITLE_COLOUR, d.title, fn)
                     )
                 fn = fn + ".pdf"
@@ -425,13 +464,17 @@ def main():
             mergefn = slugify("-".join(mergefn))
             mergefn = mergefn + ".pdf"
             print("Merging documents into [#40D0FF bold]%s[/]..." % (mergefn))
+            if opts["showthumb"]:
+                mergefn = tempfile.gettempdir() + os.sep + mergefn
             merge_docs(mergefn, all_files, dates, opts["showthumb"], all_ids)
             if opts["show"] or opts["showthumb"]:
                 os.system("open %s" % (mergefn))
         return
 
+    extracted = []
     if docs is not None:
         print("Found %d documents" % (len(docs)))
+        new_titles = {}
         for i, d in enumerate(docs):
             if opts["modcorrespondent"]:
                 d = pc.set_doc_correspondent(d.id, opts["modcorrespondent"])
@@ -441,9 +484,14 @@ def main():
                 d = pc.set_doc_title(d.id, opts["modtitle"])
             if "-mt" in sys.argv and opts["rename"] is not None:
                 fn = d.filename_with_pattern(opts["rename"])
+                if fn not in new_titles:
+                    new_titles[fn] = 1
+                else:
+                    new_titles[fn] = new_titles[fn] + 1
+                    fn = fn + "_%d" % (new_titles[fn])
                 if fn is not None and len(fn) > 0:
                     print(
-                        "  Changing title [%s bold]%s[/] to [#C060F0 bold]%s[/]"
+                        "  Changing title [%s bold]%s[/] to [#7080F0 bold]%s[/]"
                         % (TITLE_COLOUR, d.title, fn)
                     )
                     d = pc.set_doc_title(d.id, fn)
@@ -451,6 +499,9 @@ def main():
                 d = pc.add_doc_tags(d.id, opts["addtag"])
             if opts["removetag"]:
                 d = pc.remove_doc_tags(d.id, opts["removetag"])
+            if opts["zdate"]:
+                new_date = d.title[-10:]
+                d = pc.set_doc_created_date(d.id, new_date)
             date_str = None
             date_count = None
             if get_content:
@@ -484,6 +535,15 @@ def main():
                 print(tp)
             if opts["veryverbose"]:
                 print(tp.tokens)
+            if opts["extract"]:
+                tp = TextProc(text=d.content)
+                for t in tp.tokens:
+                    extracted.append(t)
+
+    if opts["extract"]:
+        with open(opts["extract"], "wt") as f:
+            for t in extracted:
+                f.write(t + "\n")
 
 
 if __name__ == "__main__":
